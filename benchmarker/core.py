@@ -138,3 +138,57 @@ class Benchmarker:
             repeats=repeats,
             warmup=self.warmup
         )
+
+@dataclass
+class BenchmarkSuite:
+    name: str
+    tests: list[BenchmarkTest] = field(default_factory=list)
+    results: dict[str, BenchmarkResult] = field(default_factory=dict)
+
+    def add(self, test: BenchmarkTest) -> None:
+        if any(t.name == test.name for t in self.tests):
+            raise ValueError(f"Duplicate test name: {test.name}")
+
+        self.tests.append(test)
+
+    def run(self, benchmarker: Benchmarker) -> dict[str, BenchmarkResult]:
+        self.results.clear()
+
+        for test in self.tests:
+            print(f"Running: {test.name}")
+
+            result = benchmarker.run(test)
+            self.results[test.name] = result
+
+        return self.results.copy()
+
+    def summary(self) -> None:
+        if not self.results:
+            print("No benchmark results available.")
+            return
+
+        print(f"\n{'=' * 75}")
+        print(f"Suite: {self.name}")
+        print(f"{'=' * 75}")
+
+        print(
+            f"{'Algorithm':<30}"
+            f"{'Median (µs)':>15}"
+            f"{'Mean (µs)':>15}"
+            f"{'CV (%)':>12}"
+        )
+
+        print("-" * 75)
+
+        for name, result in self.results.items():
+            cv = (
+                result.stdev / result.mean * 100
+                if result.mean > 0 else 0.0
+            )
+
+            print(
+                f"{name:<30}"
+                f"{result.median / 1000:>15.2f}"
+                f"{result.mean / 1000:>15.2f}"
+                f"{cv:>12.2f}"
+            )
