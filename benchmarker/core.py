@@ -1,9 +1,30 @@
 import time
 from collections.abc import Callable
+from enum import Enum
 from typing import Any
-
-from benchmarker.calibration import calibrate
+from benchmarker.calibration import calibrate, calibrate_test
 from benchmarker.result import BenchmarkResult
+from dataclasses import dataclass, field
+
+type Arguments = tuple[tuple[Any, ...], dict[str, Any]]
+type Setup = Callable[[], Arguments]
+type Validator = Callable[[Any, Arguments, Arguments], bool]
+
+
+class MeasurementMode(str, Enum):
+    BLOCK = "block"
+    INDIVIDUAL = "individual"
+
+
+@dataclass
+class BenchmarkTest:
+    name: str
+    func: Callable[..., Any]
+    args: tuple[Any, ...] = ()
+    kwargs: dict[str, Any] = field(default_factory=dict)
+    setup: Setup | None = None
+    measurement_mode: MeasurementMode = MeasurementMode.BLOCK
+
 
 
 class Benchmarker:
@@ -12,21 +33,18 @@ class Benchmarker:
         repeats: int | str = "auto",
         samples: int = 10,
         warmup: int = 10,
-        target_ns: int = 100_000_000
+        target_ns: int = 100_000_000,
+        max_repeats: int = 10_000_000,
     ):
+        self.elapsed_ns: int = 0
+        self.max_repeats = max_repeats
         self.repeats = repeats
         self.samples = samples
         self.warmup = warmup
         self.target_ns = target_ns
+        self._validate()
 
-    def run(
-            self,
-            func: Callable[..., Any],
-            *args: Any,
-            **kwargs: Any
-    ) -> BenchmarkResult:
-
-        # Validations
+    def _validate(self) -> None:
         if self.samples <= 0:
             raise ValueError("samples must be positive")
 
@@ -36,17 +54,63 @@ class Benchmarker:
         if self.target_ns <= 0:
             raise ValueError("target_ns must be positive")
 
-        # Warmup
-        for _ in range(self.warmup):
-            func(*args, **kwargs)
+        if self.max_repeats <= 0:
+            raise ValueError("max_repeats must be positive")
+
+        if self.repeats != "auto" and (
+                not isinstance(self.repeats, int)
+                or isinstance(self.repeats, bool)
+                or self.repeats <= 0
+        ):
+            raise ValueError("invalid repeats")
+
+    def _get_args(self, test: BenchmarkTest) -> Arguments:
+        if test.setup is None:
+            args, kwargs = test.args, test.kwargs
+        else:
+            args, kwargs = test.setup()
+
+        return args, kwargs
+
+    def measure(self, test: BenchmarkTest, repeats: int) -> int:
+        if repeats <= 0:
+            raise ValueError("repeats must be positive")
+
+        if test.measurement_mode == MeasurementMode.BLOCK:
+            args, kwargs = self._get_args(test)
+            start = time.perf_counter_ns()
+            for _ in range(repeats):
+                test.func(*args, **kwargs)
+
+            return time.perf_counter_ns() - start
+        elif test.measurement_mode == MeasurementMode.INDIVIDUAL:
+            elapsed_ns = 0
+            for _ in range(repeats):
+                args, kwargs = self._get_args(test)
+                start = time.perf_counter_ns()
+                test.func(*args, **kwargs)
+                elapsed_ns += time.perf_counter_ns() - start
+
+            return elapsed_ns
+        else:
+            raise ValueError("invalid measurement mode")
+
+
+    def run(
+            self,
+            test: BenchmarkTest,
+    ) -> BenchmarkResult:
+        # Warm-up
+        if self.warmup > 0:
+            self.measure(test, self.warmup)
 
         # Calibration
         if self.repeats == "auto":
-            repeats = calibrate(
-                func,
-                *args,
+            repeats = calibrate_test(
+                test,
+                self,
                 target_ns=self.target_ns,
-                **kwargs
+                max_repeats=self.max_repeats
             )
         elif (
                 not isinstance(self.repeats, int)
@@ -63,21 +127,14 @@ class Benchmarker:
         results: list[float] = []
 
         for _ in range(self.samples):
-            start = time.perf_counter_ns()
+            # Timer per execution
 
-            for _ in range(repeats):
-                func(*args, **kwargs)
+            elapsed_ns = self.measure(test, repeats)
 
-            end = time.perf_counter_ns()
-
-            results.append((end - start) / repeats)
+            results.append(elapsed_ns / repeats)
 
         return BenchmarkResult(
             times=results,
             repeats=repeats,
             warmup=self.warmup
         )
-
-
-
-
